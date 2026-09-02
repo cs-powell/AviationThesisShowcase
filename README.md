@@ -4,6 +4,8 @@ A closed-loop computational model of pilot control behavior integrated with **X-
 
 The project investigates computational modeling of pilot behavior during approach and landing by connecting a pilot model directly to a flight simulator, allowing aircraft state to feed back into subsequent control actions throughout the simulation.
 
+[![Computational Pilot Model Demonstration](./figures/sample%20comparisons/AltAGLovertime.png)](https://drive.google.com/file/d/1-zXgSHbq23a6gcKL4D1h9uxnbbCKlZY-/view?usp=sharing)
+
 ## Demonstration
 
 [![Computational Pilot Model Demonstration](./figures/DemoPreview.png)](https://drive.google.com/file/d/1-zXgSHbq23a6gcKL4D1h9uxnbbCKlZY-/view?usp=sharing)
