@@ -12,10 +12,7 @@ The project investigates computational modeling of pilot behavior during approac
 
 **[Watch the full demonstration video →](https://drive.google.com/file/d/1-zXgSHbq23a6gcKL4D1h9uxnbbCKlZY-/view?usp=sharing)**
 
-
-
 ## System Overview
-
 The model operates in a closed loop with X-Plane:
 
 **Aircraft State → Pilot Model → Flight Controls → X-Plane Dynamics → Updated Aircraft State → ...**
@@ -123,6 +120,7 @@ Real-world flight data provides an additional empirical reference for initializi
 │   └── comparison/        # Real vs. simulated behavior
 │
 ├── figures/               # Selected figures and visualizations
+├──sample_model_telemetry  # Sample telemetry from model flights, descents, and landings in the simulator environment
 └── README.md
 ```
 
