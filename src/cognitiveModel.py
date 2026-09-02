@@ -1,0 +1,219 @@
+import sys
+import time
+import xpc
+import math
+from geographiclib.geodesic import Geodesic as geo
+from rich import print
+from sandbox import sandbox as sb
+from modelParameters import params
+from modelParameters import *
+### Define variables/parameters for aircraft class/category : Wisdom of Raju 
+class AircraftLandingModel():
+    def __init__(self,client,printFlag):
+        super().__init__()
+        self.client = client
+        self.parameters = params()
+        self.parameters.initialize()
+        self.inProgress = True
+        self.allowPrinting = printFlag
+        self.coordinateArray = [[39.875027,-104.696482]]
+
+    def reassignClient(self,newClient):
+        self.client = newClient
+
+    def getSimulationStatus(self):
+        return self.inProgress
+    
+
+    def get_radial_error(self,station_lat,station_long, current_lat,current_long,radial):
+        bearing = geo.WGS84.Inverse(
+        station_lat,
+        station_long,
+        current_lat,
+        current_long
+        )['azi1']
+        bearing = (bearing + 360) % 360
+        error = (radial - bearing + 540) % 360 - 180
+        return error
+    
+    def intercept_course(self,current_bearing_to_station, desired_radial, intercept_angle=30):
+        diff = (desired_radial - current_bearing_to_station + 360) % 360
+        if diff > 180:
+            # radial is to the left
+            return (desired_radial + intercept_angle) % 360
+        else:
+            # radial is to the right
+            return (desired_radial - intercept_angle) % 360
+
+    def get_bearing(self,lat1,long1,lat2, long2): 
+        brngAzi = geo.WGS84.Inverse(lat1, long1, lat2, long2)['azi1']
+        brng = (brngAzi + 360) % 360
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"heading"],listAccess.TARGET.value,permissions.WRITE.value,brng)
+
+    def distanceFromPoint(self,lat1, lat2, long1, long2):
+        dist = geo.WGS84.Inverse(lat1, long1, lat2, long2)['s12']
+        print(dist)
+        return dist
+
+    def getAndLoadDREFS(self):
+        try:
+            sources = self.parameters.getModelDREFS()
+            keys =  self.parameters.getModelKeys()
+            results = self.client.getDREFs(sources)
+            keyValueResults = list(zip(keys,results))
+            for (key,value) in keyValueResults:
+                self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,key],listAccess.CURRENT.value,permissions.WRITE.value,value[0])
+
+            lat  = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"latitude"],listAccess.CURRENT.value,permissions.READ)
+            long = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"longitude"],listAccess.CURRENT.value,permissions.READ)
+            targetLatitude = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"latitude"],listAccess.TARGET.value,permissions.READ)
+            targetLongitude = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"longitude"],listAccess.TARGET.value,permissions.READ)
+            self.get_bearing(lat,long,targetLatitude,targetLongitude)
+            self.parameters.visionCycle() ## Update the vision queue before the next state update
+        except Exception as e:
+            print(e)
+
+    def proportionalIntegralControl(self,k, delta_theta, k_i,theta,delta_t,deadBand:int = 0): 
+        # Edited to better align with the Embry Riddle Equations presented in https://doi.org/10.58940/2329-258X.2026
+        delta_control = 0
+        THETA_DEADBAND = deadBand
+        if(theta > THETA_DEADBAND or theta < -THETA_DEADBAND): # Deadband of 0 degrees
+            theta_dot = delta_theta / delta_t # dampening
+            delta_control = k*delta_theta + k_i*theta*delta_t - 0.01 * theta_dot
+        return delta_control
+        
+    def clamp(self,value,minVal:int=-1,maxVal:int=1):
+            return min(maxVal,max(minVal,value))
+
+    def headingToRoll(self,headingDifference):
+        rollDegreesTarget = self.clamp(headingDifference/45,-1,1) * 30
+        return (rollDegreesTarget)
+    
+    def update_controls_simultaneously(self):
+        """
+        Update all controls at the same time by calculating control values for each parameter.
+        """
+        TESTSCALINGFACTOR = 1
+        delta_yoke_pull = self.proportionalIntegralControl(
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.K],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"pitch"],listAccess.DELTA_THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.Ki],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"pitch"],listAccess.THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.TIMING,timeValues.DELTA_T],listAccess.TIMING.value,permissions.READ)
+            )
+
+        ##HEADING
+        headingTarget = abs(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"heading"],listAccess.TARGET.value,permissions.READ))
+        headingCurrent = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"heading"],listAccess.CURRENT.value,permissions.READ)
+        headingDiff = headingTarget - headingCurrent
+
+        rollTarget = self.headingToRoll(headingDiff)
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"roll"],listAccess.TARGET.value,permissions.WRITE.value,rollTarget)\
+        
+        ## DISTANCE AND LAT LONG TURNOVER
+        lat  = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"latitude"],listAccess.CURRENT.value,permissions.READ)
+        long = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"longitude"],listAccess.CURRENT.value,permissions.READ)
+        targetLatitude = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"latitude"],listAccess.TARGET.value,permissions.READ)
+        targetLongitude = self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"longitude"],listAccess.TARGET.value,permissions.READ)
+        distance = self.distanceFromPoint(lat,targetLatitude,long,targetLongitude)
+
+        if(distance < 1000 and self.coordinateArray.__len__() > 0):
+            print("Coordinates Advancing")
+            coordinates = self.coordinateArray.pop()
+            print(self.coordinateArray)
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"latitude"],listAccess.TARGET.value,permissions.WRITE.value,coordinates[0])
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"longitude"],listAccess.TARGET.value,permissions.WRITE.value,coordinates[1])
+            print(self.coordinateArray)
+
+        delta_yoke_steer = self.proportionalIntegralControl(
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.K],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"roll"],listAccess.DELTA_THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.Ki],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"roll"],listAccess.THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.TIMING,timeValues.DELTA_T],listAccess.TIMING.value,permissions.READ)
+        )
+
+        delta_rudder = self.proportionalIntegralControl(
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.K],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"slip_skid"],listAccess.DELTA_THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.Ki],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"slip_skid"],listAccess.THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.TIMING,timeValues.DELTA_T],listAccess.TIMING.value,permissions.READ)
+        )
+
+        delta_throttle   = self.proportionalIntegralControl(
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.K],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"vertical_speed"],listAccess.DELTA_THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.INTEGRAL_VALUES,integralValues.Ki],listAccess.INTEGRAL_VALUE.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"vertical_speed"],listAccess.THETA.value,permissions.READ),
+            self.parameters.dictionaryAccess([parameterType.TIMING,timeValues.DELTA_T],listAccess.TIMING.value,permissions.READ),
+            100
+        )        
+        
+        new_yoke_pull   = self.clamp(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.YOKE_PULL],listAccess.CONTROL_VALUE.value,permissions.READ) + delta_yoke_pull)
+        new_yoke_steer  = self.clamp(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.YOKE_STEER],listAccess.CONTROL_VALUE.value,permissions.READ) + delta_yoke_steer)
+        new_rudder      = self.clamp(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.RUDDER],listAccess.CONTROL_VALUE.value,permissions.READ) + delta_rudder)
+        new_throttle    = self.clamp(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.THROTTLE],listAccess.CONTROL_VALUE.value,permissions.READ) + delta_throttle,0)
+        
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.YOKE_PULL],listAccess.CONTROL_VALUE.value,permissions.WRITE.value,new_yoke_pull)
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.YOKE_STEER],listAccess.CONTROL_VALUE.value,permissions.WRITE.value,new_yoke_steer)
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.RUDDER],listAccess.CONTROL_VALUE.value,permissions.WRITE.value,new_rudder)
+        self.parameters.dictionaryAccess([parameterType.AIRCRAFT_CONTROLS,aircraftControls.THROTTLE],listAccess.CONTROL_VALUE.value,permissions.WRITE.value,new_throttle)
+
+        # self.parameters.printParameter(self.allowPrinting)
+        self.conditionChecks()
+        self.send_controls_to_xplane(new_yoke_pull/TESTSCALINGFACTOR,new_yoke_steer/TESTSCALINGFACTOR,  new_rudder/TESTSCALINGFACTOR, new_throttle)
+
+    def send_controls_to_xplane(self, yoke_pull, yoke_steer, rudder, throttle):
+        """
+        Sends all control inputs to X-Plane using XPlaneConnect
+        """
+        self.client.sendCTRL([yoke_pull, yoke_steer, rudder, throttle, -998, -998])  # Control inputs: [yoke_pull, yoke_steer, rudder, throttle]
+
+    def conditionChecks(self,manualControl:bool = False):
+        flaps = [0]
+
+        if (self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) <= 500):
+            # self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"flaps"],listAccess.TARGET.value,permissions.WRITE.value, 0.5)
+            flaps = [0]
+            if (self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) <= 500):
+                flaps = [0.25]
+            if (self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) <= 250):
+                flaps = [0.55]
+            if (self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) <= 100):
+                flaps = [1.0]
+           
+        if not manualControl:
+            self.client.sendDREF("sim/flightmodel/controls/flaprqst", flaps)
+
+        if(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"wheelWeight"],listAccess.CURRENT.value,permissions.READ.value) > 0.01
+           and self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"wheelSpeed"],listAccess.CURRENT.value,permissions.READ.value) > 1):
+            self.parameters.dictionaryAccess([parameterType.PHASE_FLAGS,flightPhase.ROLLOUT.value],listAccess.PHASE_FLAG.value,permissions.WRITE.value, True)
+            if not manualControl:
+                self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"brakes"],listAccess.TARGET.value,permissions.WRITE.value, 1)
+
+        if (self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) <= 15
+            and self.parameters.dictionaryAccess([parameterType.PHASE_FLAGS,flightPhase.FLARE.value],listAccess.PHASE_FLAG.value,permissions.READ.value) == False):
+            self.parameters.dictionaryAccess([parameterType.PHASE_FLAGS,flightPhase.FLARE.value],listAccess.PHASE_FLAG.value,permissions.WRITE.value, True)
+            if not manualControl:
+                self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"pitch"],listAccess.TARGET.value,permissions.WRITE.value, 6)
+                self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"vertical_speed"],listAccess.TARGET.value,permissions.WRITE.value, -200)
+
+        else: 
+            if(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"altitude"],listAccess.CURRENT.value,permissions.READ.value) >= 30):
+                self.parameters.dictionaryAccess([parameterType.PHASE_FLAGS,flightPhase.FLARE.value],listAccess.PHASE_FLAG.value,permissions.WRITE.value, False)
+
+        if(self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"wheelWeight"],listAccess.CURRENT.value,permissions.READ.value) > 0.01
+           and self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"wheelSpeed"],listAccess.CURRENT.value,permissions.READ.value) < 1
+           and self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"airspeed"],listAccess.CURRENT.value,permissions.READ.value) < 2
+        #    and self.parameters.dictionaryAccess([parameterType.AIRCRAFT_STATE,"brakes"],listAccess.CURRENT.value,permissions.READ.value) > 0.9
+           ):  
+            self.inProgress = False
+        self.parameters.printParameter(self.allowPrinting)
+
+    # Update the model's DM based on X-Plane data
+    def update_aircraft_state(self,manualControl:bool = False):
+        """
+        Faster Method
+        """
+        self.getAndLoadDREFS()

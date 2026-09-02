@@ -1,0 +1,58 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build X-Plane Plugin (macOS Universal)",
+            "type": "shell",
+            "command": "/usr/bin/clang++",
+            "args": [
+    "-std=c++17",
+    "-Wall",
+    "-Werror",
+
+    /* Build both architectures */
+    "-arch", "x86_64",
+    "-arch", "arm64",
+
+    /* X-Plane platform macros */
+    "-DAPL=1",
+    "-DXPLM=210",
+
+    /* X-Plane SDK Headers */
+    "-I${workspaceFolder}/SDK/CHeaders",
+
+    "-I${workspaceFolder}/aws-sdk/include",
+"-L${workspaceFolder}/aws-sdk/lib",
+"-laws-cpp-sdk-core",
+"-laws-cpp-sdk-s3",
+"-lcurl",
+// "-lssl",
+// "-lcrypto",
+"-framework", "Security",
+"-framework", "CoreFoundation",
+"-lz",
+"-Wl,-rpath,@loader_path",
+
+    /* Link the X-Plane frameworks */
+    "-F${workspaceFolder}/SDK/Libraries/Mac",
+    "-framework", "XPLM",
+    "-framework", "XPWidgets",
+
+    /* Plugin target type */
+    "-dynamiclib",
+    "-fPIC",
+    "-mmacosx-version-min=10.11",
+
+    /* Output plugin file */
+    "-o",
+    "${workspaceFolder}/build/mac.xpl",
+
+    /* Source files */
+    "${workspaceFolder}/SimData.cpp"
+],
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "detail": "Compile universal macOS X-Plane plugin"
+        }
+    ]
+}
