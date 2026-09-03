@@ -113,6 +113,8 @@ Real-world flight data provides an additional empirical reference for initializi
 ├── src/
 │   ├── model/             # Computational pilot model
 │   └── xplane_plugin/     # X-Plane integration
+│   └── MatlabModels       # Matlab control loop representation to aid in tuning/debugging
+│   └── Iterations         # Previous Model implementations/proof of concept in Java
 │
 ├── analysis/
 │   ├── empirical/         # Real-world flight-data analysis
